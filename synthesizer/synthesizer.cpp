@@ -11,20 +11,23 @@
 #define OSC_SQUARE 1
 #define OSC_TRIANGLE 2
 #define OSC_SAW_ANA 3
-#define OSC_SAW_OPT 4
-#define OSC_NOISE 5
+#define OSC_SAW_DIG 4
+#define OSC_SAW_REV 5
+#define OSC_NOISE 6
 
 
 
 
 // Holds output frequency
 atomic<double> frequencyOutput = 0.0;
-// Base octave: A2
-double octaveBaseFrequency = 110.0;
-// Scaling factor for 12-tone equal temperament
-double twelveToneScaling = pow(2.0, 1.0 / 12.0);
+// Base octave: A3
+double octaveBaseFrequency = 220.0;
+// Scaling factor for 12-tone just intonation
+const double twelfthRootOf2 = 1.0594630943592952645618252949463;
 // Master Volume
 double masterVolume = 0.4;
+// Oscillator Used
+int oscInUse = OSC_SINE;
 
 // Takes a frequency (Hz) and returns it in angular velocity
 double w(double hertz)
@@ -32,48 +35,97 @@ double w(double hertz)
 	return hertz * 2 * PI;
 }
 
-// Takes a note in Hertz and what interval is wanted, returns that interval in Hertz.
+// Takes a note in Hertz and what interval is wanted, returns the just intonation interval in Hertz.
 // A positive interval returns a note in the higher octave, a negative in the lower.
-double noteInterval(double note, int interval)
+double noteJustInterval(double note, int interval)
 {
-	return note * pow(twelveToneScaling, interval);
+	return note * pow(twelfthRootOf2, interval);
 }
 
-// Returns amplitude as a function of various types of oscilators
-double osc(double hertz, double time, int type = OSC_SINE)
+// Takes a note in Hertz and what interval is wanted, returns the equal temperament interval in Hertz.
+// A positive interval returns a note in the higher octave, a negative in the lower.
+double noteEqualInterval(int interval)
 {
+	return octaveBaseFrequency * pow(twelfthRootOf2, interval);
+}
+
+string noteName(int interval)
+{
+	// Array of note name assignments
+	const char* notes[] = { "A", "A#", "B", "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#" };
+	int octave = interval / 12;
+	int idx = interval % 12;
+	string n = notes[idx];
+	return std::string(notes[idx]) + std::to_string(octave);
+}
+
+
+// Returns amplitude as a function of various types of oscilators
+double osc(double hertz, double time, int type = OSC_SINE, double LFOHertz = 5.0, double LFOAmplitude = 0.002)
+{
+	// Frequency (angular velocity * time) modulated by an LFO sine wave
+	double frequency = w(hertz) * time + LFOAmplitude * hertz * sin(w(LFOHertz) * time);
+
+
 	switch (type)
 	{
 		// Sine Wave
 		case OSC_SINE:
-			return sin(w(hertz) * time);
+			return sin(frequency);
 		// Square Wave
 		case OSC_SQUARE:
-			return sin(w(hertz) * time) > 0.0 ? 1.0 : -1.0;
+			return sin(frequency) > 0.0 ? 1.0 : -1.0;
 		// Triangle Wave
 		case OSC_TRIANGLE:
-			return asin(sin(w(hertz) * time)) * 2.0 / PI;
+			return asin(sin(frequency)) * 2.0 / PI;
+		
+			
 		// Saw Wave (Analog)
 		case OSC_SAW_ANA:
 		{
 			double output = 0.0;
 
 			for (double n = 1.0; n < 100.0; n++) {
-				output += sin(n * w(hertz) * time) / n;
+				output += sin(n * frequency) / n;
 			}
 
 			return output * (2.0 / PI);
 		}
-		// Saw Wave (Optimised)
-		case OSC_SAW_OPT:
-			return (2.0 / PI) * (hertz * PI * fmod(time, 1.0 / hertz) - (PI / 2.0));
+		// Saw Wave (Digital)
+		case OSC_SAW_DIG:
+		{
+
+			// FREQUENCY MODULATION QUESTIONABLE FOR DIGITAL SAW WAVES
+			// Frequency is increasing with each period.
+			
+			
+			double normalizedHertz = hertz / (2.0 * PI);
+			double f = w(normalizedHertz) + LFOAmplitude * sin(w(LFOHertz) * time);
+
+			return (2.0 / PI) * (f * PI * fmod(time, 1.0 / f) - (PI / 2.0));
+
+		}
+		case OSC_SAW_REV:
+		{
+
+			// FREQUENCY MODULATION QUESTIONABLE FOR DIGITAL SAW WAVES
+			// Frequency is increasing with each period.
+
+			double normalizedHertz = hertz / (2.0 * PI);
+			double f = w(normalizedHertz) + LFOAmplitude * sin(w(LFOHertz) * time);
+
+			return (2.0 / PI) * atan(tan((PI / 2) - ((time * PI) / (1 / f))));
+
+		}
 		// Noise
 		case OSC_NOISE:
 			return 2.0 * ((double) rand() / (double) RAND_MAX) - 1.0;
+			// Arcatan-Cotan Saw Wave
 		
 		default: 0.0;
 	}
 }
+
 
 
 
@@ -111,21 +163,21 @@ struct EnvelopeADSR
 	}
 
 	wstring GetPhase(double time) {
-		wstring * phase = new wstring(L"\rERR");
+		wstring * phase = new wstring(L"ERR");
 
 		double lifeTime = time - triggerOnTime;
 
 		if (noteOn)
 		{
 			if (lifeTime <= attackTime)
-				phase = new wstring(L"\rATTACK");
+				phase = new wstring(L"ATTACK");
 			if (lifeTime > attackTime && lifeTime <= (decayTime + attackTime))
-				phase = new wstring(L"\rDECAY");
+				phase = new wstring(L"DECAY");
 			if (lifeTime > (attackTime + decayTime))
-				phase = new wstring(L"\rSUSTAIN");
+				phase = new wstring(L"SUSTAIN");
 		}
 		else
-			phase = new wstring(L"\rRELEASE");
+			phase = new wstring(L"RELEASE");
 
 		return *phase;
 
@@ -206,11 +258,7 @@ EnvelopeADSR envelope;
 // Make a sound for some given time
 double MakeNoise(double time)
 {
-	double output = envelope.GetAmplitude(time) *
-		(
-			+ 1.0 * osc(frequencyOutput * 0.5, time, OSC_SINE)
-			+ 1.0 * osc(frequencyOutput * 1.0, time, OSC_SAW_ANA)
-		);
+	double output = envelope.GetAmplitude(time) * osc(frequencyOutput, time, oscInUse);
 	// Master volume scaling
 	return output * masterVolume;
 
@@ -255,16 +303,29 @@ int main()
 		keyDown = false;
 		for (int k = 0; k < 17; k++)
 		{
-			if (GetAsyncKeyState((unsigned char)("ZSXCFVGBNJMK\xbcL\xbe\xbf"[k])) & 0x8000) {
-
+			if (GetAsyncKeyState((unsigned char)("ZSXCFVGBNJMK\xbcL\xbe\xbf"[k])) & 0x8000)
+			{
 				if (currentKey != k)
 				{
 					envelope.NoteOn(sound.GetTime());
-					frequencyOutput = noteInterval(octaveBaseFrequency, k);
+					frequencyOutput = noteEqualInterval(k);
 					currentKey = k;
+
+					// Array of note name assignments
+					const char* notes[] = { "A", "A#", "B", "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#" };
+					int octave = (k + 24) / 12;
+					int idx = k % 12;
+					string n = notes[idx];
+					wcout << "\r                                   Note: " << notes[idx] << octave <<
+						" Pitch: " << frequencyOutput << "            ";
 				}
 
 				keyDown = true;
+			}
+
+			if (GetAsyncKeyState((unsigned char)("1234567"[k])) & 0x8000)
+			{
+				oscInUse = k;
 			}
 		}
 
@@ -277,7 +338,24 @@ int main()
 			}
 		}
 
-		wcout << envelope.GetPhase(sound.GetTime());
+
+		if(oscInUse == 0)
+			wcout << L"\r Osc: SINE";
+		if (oscInUse == 1)
+			wcout << L"\r Osc: SQUARE";
+		if (oscInUse == 2)
+			wcout << L"\r Osc: TRIANGLE";
+		if (oscInUse == 3)
+			wcout << L"\r Osc: ANALOG SAW";
+		if (oscInUse == 4)
+			wcout << L"\r Osc: DIGITAL SAW";
+		if (oscInUse == 5)
+			wcout << L"\r Osc: REVERSE SAW";
+		if (oscInUse == 6)
+			wcout << L"\r Osc: NOISE";
+
+
+		wcout << "   Env: " << envelope.GetPhase(sound.GetTime()) << "    ";
 
 	}
 
